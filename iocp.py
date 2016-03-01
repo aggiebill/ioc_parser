@@ -80,8 +80,9 @@ from whitelist import WhiteList
 class IOC_Parser(object):
     patterns = {}
     defang = {}
-
-    def __init__(self, patterns_ini=None, input_format='pdf', dedup=False, library='pdfminer', output_format='csv', output_handler=None):
+	
+	
+    def __init__(self, patterns_ini=None, input_format='pdf', dedup=False, library='pdfminer', output_format='JSON', output_handler=None):
         basedir = os.path.dirname(os.path.abspath(__file__))
         if patterns_ini is None:
             patterns_ini = os.path.join(basedir, 'patterns.ini')
@@ -111,7 +112,8 @@ class IOC_Parser(object):
             if 'beautifulsoup' not in IMPORTS:
                 e = 'HTML parser library not found: BeautifulSoup'
                 raise ImportError(e)
-
+	
+	
     def load_patterns(self, fpath):
         config = ConfigParser.ConfigParser()
         with open(fpath) as f:
@@ -143,89 +145,129 @@ class IOC_Parser(object):
         except KeyError as e:
             pass
         return False
-
+	
+	################################################################################
+	################################################################################
     def parse_page(self, fpath, data, page_num):
-        for ind_type, ind_regex in self.patterns.items():
-            matches = ind_regex.findall(data)
+		''' Parse page for IOCs. '''
+		iocs = []
+		for ind_type, ind_regex in self.patterns.items():
+			matches = ind_regex.findall(data)
+			
+			# For each matched indicator...
+			for ind_match in matches:
+				if isinstance(ind_match, tuple):
+					ind_match = ind_match[0]
 
-            for ind_match in matches:
-                if isinstance(ind_match, tuple):
-                    ind_match = ind_match[0]
+				if self.is_whitelisted(ind_match, ind_type):
+					continue
 
-                if self.is_whitelisted(ind_match, ind_type):
-                    continue
+				if ind_type in self.defang:
+					ind_match = re.sub(r'\[\.\]', '.', ind_match)
 
-                if ind_type in self.defang:
-                    ind_match = re.sub(r'\[\.\]', '.', ind_match)
+				if self.dedup:
+					if (ind_type, ind_match) in self.dedup_store:
+						continue
 
-                if self.dedup:
-                    if (ind_type, ind_match) in self.dedup_store:
-                        continue
+					self.dedup_store.add((ind_type, ind_match))
 
-                    self.dedup_store.add((ind_type, ind_match))
-
-                self.handler.print_match(fpath, page_num, ind_type, ind_match)
-
+				iocs.append( self.handler.return_match(fpath, page_num, ind_type, ind_match) ) # [TO-modified]
+				
+		return iocs
+	
+	################################################################################
+	################################################################################
+	
     def parse_pdf_pypdf2(self, f, fpath):
-        try:
-            pdf = PdfFileReader(f, strict = False)
+		text = ""
+		iocs = None
+		try:
+			pdf = PdfFileReader(f, strict = False)
 
-            if self.dedup:
-                self.dedup_store = set()
+			if self.dedup:
+				self.dedup_store = set()
 
-            self.handler.print_header(fpath)
-            page_num = 0
-            for page in pdf.pages:
-                page_num += 1
+			self.handler.print_header(fpath)
+			page_num = 0
+			for page in pdf.pages:
+				page_num += 1
 
-                data = page.extractText()
-
-                self.parse_page(fpath, data, page_num)
-            self.handler.print_footer(fpath)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:
-            self.handler.print_error(fpath, e)
-
+				data = page.extractText()
+				
+				# Parse IOCs
+				temp_iocs = self.parse_page(fpath, data, page_num) # parse_page
+				
+				# Add IOCs to collection
+				iocs.extend(temp_iocs)
+				
+				# Add new page
+				text += data
+				
+			self.handler.print_footer(fpath)
+		except (KeyboardInterrupt, SystemExit):
+			raise
+		except Exception as e:
+			self.handler.print_error(fpath, e)
+		return text, iocs
+		
     def parse_pdf_pdfminer(self, f, fpath):
-        try:
-            laparams = LAParams()
-            laparams.all_texts = True  
-            rsrcmgr = PDFResourceManager()
-            pagenos = set()
+		text = ""
+		iocs = []
+		try:
+			laparams = LAParams()
+			laparams.all_texts = True  
+			rsrcmgr = PDFResourceManager()
+			pagenos = set()
 
-            if self.dedup:
-                self.dedup_store = set()
+			if self.dedup:
+				self.dedup_store = set()
 
-            self.handler.print_header(fpath)
-            page_num = 0
-            for page in PDFPage.get_pages(f, pagenos, check_extractable=True):
-                page_num += 1
+			self.handler.print_header(fpath)
+			page_num = 0
+			for page in PDFPage.get_pages(f, pagenos, check_extractable=True):
+				page_num += 1
 
-                retstr = StringIO()
-                device = TextConverter(rsrcmgr, retstr, laparams=laparams)
-                interpreter = PDFPageInterpreter(rsrcmgr, device)
-                interpreter.process_page(page)
-                data = retstr.getvalue()
-                retstr.close()
-
-                self.parse_page(fpath, data, page_num)
-            self.handler.print_footer(fpath)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:
-            self.handler.print_error(fpath, e)
-
+				retstr = StringIO()
+				device = TextConverter(rsrcmgr, retstr, laparams=laparams)
+				interpreter = PDFPageInterpreter(rsrcmgr, device)
+				interpreter.process_page(page)
+				data = retstr.getvalue()
+				retstr.close()
+				
+				# Parse IOCs
+				temp_iocs = self.parse_page(fpath, data, page_num) # parse_page
+				
+				# Add IOCs to collection
+				iocs.extend(temp_iocs)
+				
+				# Add new page
+				text += data
+				
+			self.handler.print_footer(fpath)
+		except (KeyboardInterrupt, SystemExit):
+			raise
+		except Exception as e:
+			self.handler.print_error(fpath, e)
+		return text, iocs
+		
     def parse_pdf(self, f, fpath):
-        parser_format = "parse_pdf_" + self.library
-        try:
-            self.parser_func = getattr(self, parser_format)
-        except AttributeError:
-            e = 'Selected PDF parser library is not supported: %s' % (self.library)
-            raise NotImplementedError(e)
-            
-        self.parser_func(f, fpath)
+		''' Parse PDF. '''
+		print "[INFO][IOCParser][f:parse_pdf] Parsing PDF..."
+		text = ""
+		iocs = []
 
+		parser_format = "parse_pdf_" + self.library
+		try:
+			self.parser_func = getattr(self, parser_format)
+		except AttributeError:
+			e = 'Selected PDF parser library is not supported: %s' % (self.library)
+			raise NotImplementedError(e)
+			
+		text, iocs = self.parser_func(f, fpath)
+		return text, iocs
+	################################################################################
+	################################################################################
+	
     def parse_txt(self, f, fpath):
         try:
             if self.dedup:
@@ -265,38 +307,46 @@ class IOC_Parser(object):
             raise
         except Exception as e:
             self.handler.print_error(fpath, e)
-
+	
+	################################################################################
     def parse(self, path):
-        try:
-            if path.startswith('http://') or path.startswith('https://'):
-                if 'requests' not in IMPORTS:
-                    e = 'HTTP library not found: requests'
-                    raise ImportError(e)
-                headers = { 'User-Agent': 'Mozilla/5.0 Gecko Firefox' }
-                r = requests.get(path, headers=headers)
-                r.raise_for_status()
-                f = StringIO(r.content)
-                self.parser_func(f, path)
-                return
-            elif os.path.isfile(path):
-                with open(path, 'rb') as f:
-                    self.parser_func(f, path)
-                return
-            elif os.path.isdir(path):
-                for walk_root, walk_dirs, walk_files in os.walk(path):
-                    for walk_file in fnmatch.filter(walk_files, self.ext_filter):
-                        fpath = os.path.join(walk_root, walk_file)
-                        with open(fpath, 'rb') as f:
-                            self.parser_func(f, fpath)
-                return
+		''' Main parse function. Selects parser by input type. '''
+		data = ""
+		iocs = []
+		try:
+			if path.startswith('http://') or path.startswith('https://'):
+				if 'requests' not in IMPORTS:
+					e = 'HTTP library not found: requests'
+					raise ImportError(e)
+				headers = { 'User-Agent': 'Mozilla/5.0 Gecko Firefox' }
+				r = requests.get(path, headers=headers)
+				r.raise_for_status()
+				f = StringIO(r.content)
+				self.parser_func(f, path)
+				return
+			#########################################################
+			elif os.path.isfile(path): # Parse file
+				print "[INFO][IOCParser][f:parse] Parsing file..."
+				with open(path, 'rb') as f:
+					text, iocs = self.parse_pdf(f, path) # Assum pdf
+				return text, iocs, path, os.path.basename(path)
+			#########################################################
+			elif os.path.isdir(path):
+				for walk_root, walk_dirs, walk_files in os.walk(path):
+					for walk_file in fnmatch.filter(walk_files, self.ext_filter):
+						fpath = os.path.join(walk_root, walk_file)
+						with open(fpath, 'rb') as f:
+							self.parser_func(f, fpath)
+				return
 
-            e = 'File path is not a file, directory or URL: %s' % (path)
-            raise IOError(e)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as e:
-            self.handler.print_error(path, e)
-
+			e = 'File path is not a file, directory or URL: %s' % (path)
+			raise IOError(e)
+		except (KeyboardInterrupt, SystemExit):
+			raise
+		except Exception as e:
+			self.handler.print_error(path, e)
+	################################################################################
+	
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument('PATH', action='store', help='File/directory/URL to report(s)')
