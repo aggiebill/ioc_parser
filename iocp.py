@@ -184,6 +184,9 @@ class IOC_Parser(object):
 		try:
 			pdf = PdfFileReader(f, strict = False)
 
+			if pdf.isEncrypted:
+				pdf.decrypt('')
+
 			if self.dedup:
 				self.dedup_store = set()
 
